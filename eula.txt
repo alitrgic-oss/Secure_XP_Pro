@@ -1,0 +1,14 @@
+END USER LICENSE AGREEMENT (EULA) FOR SecureXP Antivirus Pro
+
+IMPORTANT: PLEASE READ THIS LICENSE AGREEMENT CAREFULLY BEFORE USING THIS SOFTWARE.
+
+1. GRANT OF LICENSE
+SecureXP Antivirus Pro grants you a personal, non-exclusive, non-transferable license to install and use this software on your Windows operating system.
+
+2. RESTRICTIONS
+You may not reverse engineer, decompile, or disassemble SecureXP. You may not rent, lease, or lend the software.
+
+3. DISCLAIMER OF WARRANTY
+The software is provided "AS IS" without warranty of any kind. The author is not responsible for any system damage or data loss.
+
+By clicking "I Agree", you acknowledge that you have read, understood, and accepted the terms of this license.

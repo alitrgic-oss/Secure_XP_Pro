@@ -1,0 +1,10 @@
+#include <windows.h>
+
+// آیکون برنامه نصب‌کننده
+101 ICON "SecureXP.ico"
+
+// منابع باینری اجرایی آنتی‌ویروس اصلی جهت ادغام در Setup
+100 RCDATA "SecureXP.exe"
+
+// متن توافق‌نامه EULA
+102 RCDATA "eula.txt"

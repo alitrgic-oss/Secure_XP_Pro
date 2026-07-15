@@ -1,14 +1,25 @@
 END USER LICENSE AGREEMENT (EULA) FOR SecureXP Antivirus Pro
 
-IMPORTANT: PLEASE READ THIS LICENSE AGREEMENT CAREFULLY BEFORE USING THIS SOFTWARE.
+IMPORTANT: PLEASE READ THIS LICENSE AGREEMENT CAREFULLY BEFORE USING THIS SOFTWARE. 
+THIS SOFTWARE IS LICENSED UNDER THE GNU GENERAL PUBLIC LICENSE VERSION 3 (GPLv3). 
+THIS EULA DOES NOT, AND IS NOT INTENDED TO, LIMIT OR RESTRICT ANY RIGHTS GRANTED TO YOU UNDER THE GPLv3.
 
-1. GRANT OF LICENSE
-SecureXP Antivirus Pro grants you a personal, non-exclusive, non-transferable license to install and use this software on your Windows operating system.
+1. GRANT OF LICENSE & COMPLIANCE WITH GPLv3
+SecureXP Antivirus Pro is free and open-source software. You are granted the rights to install, run, copy, modify, and redistribute this software solely under the terms and conditions of the GNU General Public License Version 3 (GPLv3) as published by the Free Software Foundation. Your use of this software constitutes your acceptance of the GPLv3.
 
-2. RESTRICTIONS
-You may not reverse engineer, decompile, or disassemble SecureXP. You may not rent, lease, or lend the software.
+2. SOURCE CODE AVAILABILITY
+In accordance with the GPLv3, the complete corresponding source code for this software is freely available to all users. Under this license, you are explicitly permitted to:
+- Study, inspect, and reverse engineer the software to understand its inner workings.
+- Modify, adapt, and customize the source code to create your own personalized versions.
+- Distribute copies of the original or modified source code, provided that any redistributed version is also released under the GNU GPLv3.
 
-3. DISCLAIMER OF WARRANTY
-The software is provided "AS IS" without warranty of any kind. The author is not responsible for any system damage or data loss.
+3. NO ADDITIONAL RESTRICTIONS
+No terms in this agreement shall impose any additional restrictions or limitations beyond those permitted by the GPLv3. Any terms, conditions, or provisions in other proprietary agreements that attempt to prohibit reverse engineering, decompilation, disassembly, commercial use, or transferring of this software are hereby declared null and void.
 
-By clicking "I Agree", you acknowledge that you have read, understood, and accepted the terms of this license.
+4. DISCLAIMER OF WARRANTY & LIMITATION OF LIABILITY
+THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH YOU. SHOULD THE SOFTWARE PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR, OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW WILL THE AUTHOR OR COPYRIGHT HOLDER BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE SOFTWARE (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES), EVEN IF SUCH HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+5. PREVALENCE OF GPLv3
+In the event of any conflict, inconsistency, or ambiguity between the terms of this End User License Agreement (EULA) and the official text of the GNU General Public License Version 3 (GPLv3), the provisions of the GNU GPLv3 shall prevail and supersede this agreement in all respects.

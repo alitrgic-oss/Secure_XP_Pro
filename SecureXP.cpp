@@ -1,5 +1,3 @@
-
-
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
@@ -89,6 +87,10 @@ volatile bool g_bSilentMode = false;
 volatile bool g_bBlockPort445 = false;
 volatile bool g_bBlockPort135 = false;
 volatile bool g_bBlockPort3389 = false;
+
+volatile bool g_bGroupPolicyHardening = true;
+volatile bool g_bOutboundFirewall = true;
+volatile bool g_bNetworkIsolation = false;
 
 int g_HeuristicLevel = 1;     
 bool g_bBlockUSB = false;     
@@ -227,6 +229,10 @@ std::wstring HexDecryptString(const wchar_t* hexData);
 DWORD WINAPI BrowserDownloadMonitorThread(LPVOID lpParam);
 DWORD WINAPI LiveHTTPSWebCacheScanThread(LPVOID lpParam);
 DWORD WINAPI RealTimeProcessExecutionShieldThread(LPVOID lpParam);
+
+void ApplyGroupPolicyHardening();
+void VerifyUserPrivilegeLevel();
+void ApplyNetworkIsolationShield();
 
 void InitSystemPaths();
 bool IsWindowsXP();
@@ -470,7 +476,6 @@ bool ConfigureSystemPortNative(int port, bool block) {
             RegSetValueExW(hKey, L"SMBDeviceEnabled", 0, REG_DWORD, (const BYTE*)&val, sizeof(DWORD));
             RegCloseKey(hKey);
         }
-        // Force-disable LanmanServer service startup if blocking SMB on XP
         SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
         if (hSCM) {
             SC_HANDLE hService = OpenServiceW(hSCM, L"LanmanServer", SERVICE_CHANGE_CONFIG | SERVICE_STOP);
@@ -497,6 +502,92 @@ bool ConfigureSystemPortNative(int port, bool block) {
         }
     }
     return false;
+}
+
+void ApplyGroupPolicyHardening() {
+    if (!g_bGroupPolicyHardening) return;
+    
+    HKEY hKey;
+    std::wstring explorerPolicies = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, explorerPolicies.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD val = 0xFF; 
+        RegSetValueExW(hKey, L"NoDriveTypeAutoRun", 0, REG_DWORD, (const BYTE*)&val, sizeof(DWORD));
+        DWORD valNoAutorun = 1;
+        RegSetValueExW(hKey, L"NoAutorun", 0, REG_DWORD, (const BYTE*)&valNoAutorun, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, explorerPolicies.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD val = 0xFF;
+        RegSetValueExW(hKey, L"NoDriveTypeAutoRun", 0, REG_DWORD, (const BYTE*)&val, sizeof(DWORD));
+        DWORD valNoAutorun = 1;
+        RegSetValueExW(hKey, L"NoAutorun", 0, REG_DWORD, (const BYTE*)&valNoAutorun, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+    
+    std::wstring lsaPolicies = L"SYSTEM\\CurrentControlSet\\Control\\Lsa";
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, lsaPolicies.c_str(), 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+        DWORD restrictAnonymous = 1; 
+        RegSetValueExW(hKey, L"RestrictAnonymous", 0, REG_DWORD, (const BYTE*)&restrictAnonymous, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+    
+    std::wstring lanmanServer = L"SYSTEM\\CurrentControlSet\\Services\\LanmanServer\\Parameters";
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, lanmanServer.c_str(), 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+        DWORD autoShare = 0;
+        RegSetValueExW(hKey, L"AutoShareWks", 0, REG_DWORD, (const BYTE*)&autoShare, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
+void VerifyUserPrivilegeLevel() {
+    if (IsUserAdmin()) {
+        ThreadSafeAddLog(L"User Privilege Diagnostic", L"High Admin Context Active", L"Warning: Recommend using a Limited User Account (LUA) to enforce Least Privilege.");
+    } else {
+        ThreadSafeAddRealtimeScanLog(L"User Privilege Diagnostic", L"Secure Context Active", L"Running as Limited Standard User.");
+    }
+}
+
+void ApplyNetworkIsolationShield() {
+    if (!g_bNetworkIsolation) return;
+    
+    SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (hSCM) {
+        const wchar_t* servicesToStop[] = { L"SSDPSRV", L"Browser", L"upnphost" };
+        for (int i = 0; i < 3; i++) {
+            SC_HANDLE hService = OpenServiceW(hSCM, servicesToStop[i], SERVICE_CHANGE_CONFIG | SERVICE_STOP);
+            if (hService) {
+                ChangeServiceConfigW(hService, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+                SERVICE_STATUS ss;
+                ControlService(hService, SERVICE_CONTROL_STOP, &ss);
+                CloseHandle(hService);
+            }
+        }
+        CloseHandle(hSCM);
+    }
+    
+    HKEY hKey;
+    std::wstring netbtParams = L"SYSTEM\\CurrentControlSet\\Services\\NetBT\\Parameters\\Interfaces";
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, netbtParams.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t subKeyName[256];
+        DWORD cbName = 256;
+        DWORD index = 0;
+        std::vector<std::wstring> interfaces;
+        while (RegEnumKeyExW(hKey, index, subKeyName, &cbName, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+            interfaces.push_back(subKeyName);
+            index++;
+            cbName = 256;
+        }
+        RegCloseKey(hKey);
+        
+        for (const auto& iface : interfaces) {
+            std::wstring fullIfacePath = netbtParams + L"\\" + iface;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullIfacePath.c_str(), 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+                DWORD netbiosOption = 2; 
+                RegSetValueExW(hKey, L"NetbiosOptions", 0, REG_DWORD, (const BYTE*)&netbiosOption, sizeof(DWORD));
+                RegCloseKey(hKey);
+            }
+        }
+    }
 }
 
 DWORD WINAPI RealTimeDriveMonitorThread(LPVOID lpParam) {
@@ -530,7 +621,7 @@ DWORD WINAPI RealTimeDriveMonitorThread(LPVOID lpParam) {
 
 DWORD WINAPI RealTimeFirewallThread(LPVOID lpParam) {
     while (g_bRealTimeProtection) {
-        if (g_bBlockPort445 || g_bBlockPort135 || g_bBlockPort3389) {
+        if (g_bBlockPort445 || g_bBlockPort135 || g_bBlockPort3389 || g_bOutboundFirewall) {
             MIB_TCPTABLE* pTcpTable = NULL;
             DWORD dwSize = 0;
             if (GetTcpTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
@@ -538,6 +629,7 @@ DWORD WINAPI RealTimeFirewallThread(LPVOID lpParam) {
                 if (pTcpTable && GetTcpTable(pTcpTable, &dwSize, FALSE) == NO_ERROR) {
                     for (DWORD i = 0; i < pTcpTable->dwNumEntries; i++) {
                         DWORD localPort = CustomNtohs((u_short)pTcpTable->table[i].dwLocalPort);
+                        DWORD remotePort = CustomNtohs((u_short)pTcpTable->table[i].dwRemotePort);
                         DWORD state = pTcpTable->table[i].dwState;
                         
                         bool block = false;
@@ -550,6 +642,34 @@ DWORD WINAPI RealTimeFirewallThread(LPVOID lpParam) {
                             row.dwState = MIB_TCP_STATE_DELETE_TCB;
                             if (dyn_SetTcpEntry) {
                                 dyn_SetTcpEntry(&row);
+                            }
+                        }
+
+                        if (g_bOutboundFirewall && state == MIB_TCP_STATE_ESTAB) {
+                            DWORD remoteAddr = pTcpTable->table[i].dwRemoteAddr;
+                            BYTE b1 = remoteAddr & 0xFF;
+                            BYTE b2 = (remoteAddr >> 8) & 0xFF;
+                            bool isLocal = (b1 == 127) || (b1 == 10) || (b1 == 192 && b2 == 168) || (b1 == 172 && b2 >= 16 && b2 <= 31);
+                            if (!isLocal) {
+                                if (remotePort == 4444 || remotePort == 1337 || remotePort == 6667 || remotePort == 31337 || remotePort == 8080) {
+                                    MIB_TCPROW row = pTcpTable->table[i];
+                                    row.dwState = MIB_TCP_STATE_DELETE_TCB;
+                                    if (dyn_SetTcpEntry) {
+                                        dyn_SetTcpEntry(&row);
+                                        
+                                        wchar_t logMsg[128];
+                                        swprintf_s(logMsg, 128, L"Closed suspicious outbound connection to C2 port: %d", remotePort);
+                                        ThreadSafeAddLog(L"Outbound Firewall Block", logMsg, L"Connection Terminated");
+                                        
+                                        static DWORD lastWarn = 0;
+                                        if (GetTickCount() - lastWarn > 30000) {
+                                            wchar_t portBuf[16];
+                                            swprintf_s(portBuf, 16, L"%d", remotePort);
+                                            ShowNotification(L"Outbound Firewall Block", std::wstring(L"Terminated unauthorized outbound connection on port ") + portBuf, NIIF_WARNING);
+                                            lastWarn = GetTickCount();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1422,7 +1542,7 @@ void DrawSidebarIcon(HDC hdc, int index, int cx, int cy, COLORREF color) {
             Polygon(hdc, lightning, 6);
             break;
         }
-        case 5: { // Quarantine Custom Box Icon
+        case 5: { 
             SelectObject(hdc, nullBrush);
             RECT box = { cx - 7, cy - 7, cx + 7, cy + 7 };
             Rectangle(hdc, box.left, box.top, box.right, box.bottom);
@@ -1451,10 +1571,8 @@ bool MoveToQuarantine(const std::wstring& filePath, const std::wstring& reason) 
     PathStripPathW(fname);
     swprintf_s(dest, MAX_PATH, L"%s\\%s.quar", g_QuarantineDir, fname);
     
-    // Temporarily normalize source file attributes before moving
     SetFileAttributesW(filePath.c_str(), FILE_ATTRIBUTE_NORMAL);
 
-    // Use MoveFileExW with overwrite flag for enhanced stability
     if (MoveFileExW(filePath.c_str(), dest, MOVEFILE_REPLACE_EXISTING)) {
         EnterCriticalSection(&g_QuarantineCS);
         g_QuarantineList.push_back(dest);
@@ -1462,7 +1580,6 @@ bool MoveToQuarantine(const std::wstring& filePath, const std::wstring& reason) 
         std::wstring qFileName = std::wstring(fname) + L".quar";
         WritePrivateProfileStringW(L"Quarantine", qFileName.c_str(), filePath.c_str(), g_ConfigFile);
         
-        // Save quarantine isolation reason
         WritePrivateProfileStringW(L"QuarantineReason", qFileName.c_str(), reason.c_str(), g_ConfigFile);
         return true;
     }
@@ -1515,7 +1632,6 @@ void PopulateQuarantineList() {
             wchar_t orig[MAX_PATH] = {0};
             GetPrivateProfileStringW(L"Quarantine", qFile.c_str(), L"Unknown Location", orig, MAX_PATH, g_ConfigFile);
             
-            // Retrieve saved quarantine reason from configuration file
             wchar_t reason[256] = {0};
             GetPrivateProfileStringW(L"QuarantineReason", qFile.c_str(), L"Manual Isolation", reason, 256, g_ConfigFile);
 
@@ -1528,7 +1644,6 @@ void PopulateQuarantineList() {
             ListView_InsertItem(g_hListView, &item);
             ListView_SetItemText(g_hListView, count, 1, orig);
             
-            // Display isolation reason in the third column
             ListView_SetItemText(g_hListView, count, 2, reason); 
         } while (FindNextFileW(hFind, &ffd) != 0);
         FindClose(hFind);
@@ -1539,7 +1654,6 @@ void PopulateStartupList() {
     HKEY hKey;
     std::wstring regPath = HexDecryptString(L"2D11180A091F0C1B2233171D0C110D11180A222917101A11090D223D0B0C0C1B100A281B0C0D171110222C0B10");
     
-    // Scan HKCU Startup
     if (RegOpenKeyExW(HKEY_CURRENT_USER, regPath.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD index = 0;
         wchar_t valueName[16384];
@@ -1566,7 +1680,6 @@ void PopulateStartupList() {
         RegCloseKey(hKey);
     }
 
-    // Scan HKLM Startup (Essential for legacy Windows XP Malware)
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPath.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD index = 0;
         wchar_t valueName[16384];
@@ -1661,7 +1774,6 @@ void SanitizeStartupList() {
                 std::wstring lowerCmd = cmd;
                 for (auto& c : lowerCmd) c = towlower(c);
                 
-                // Enhanced directory coverage for legacy Windows XP folder paths
                 if (lowerCmd.find(L"\\temp\\") != std::wstring::npos || 
                     lowerCmd.find(L"\\users\\public\\") != std::wstring::npos ||
                     lowerCmd.find(L"\\documents and settings\\all users\\") != std::wstring::npos) {
@@ -1955,7 +2067,7 @@ void PerformRealtimeScan() {
         if (RegOpenKeyExW(HKEY_CURRENT_USER, regPath.c_str(), 0, KEY_READ | KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
             wchar_t existingPath[MAX_PATH] = {0};
             DWORD cbData = sizeof(existingPath);
-            if (RegQueryValueExW(hKey, L"SecureXP", NULL, NULL, (LPBYTE)existingPath, &cbData) != ERROR_SUCCESS ||
+            if (RegQueryValueExW(hKey, L"SecureXP", NULL, NULL, (LPBYTE)&existingPath, &cbData) != ERROR_SUCCESS ||
                 wcscmp(existingPath, exePath) != 0) {
                 RegSetValueExW(hKey, L"SecureXP", 0, REG_SZ, (const BYTE*)exePath, (wcslen(exePath) + 1) * sizeof(wchar_t));
             }
@@ -2013,6 +2125,10 @@ void LoadSettings() {
     g_bHostsGuard = (GetPrivateProfileIntW(L"Settings", L"HostsGuard", 0, g_ConfigFile) == 1); 
     g_bLsassProtect = (GetPrivateProfileIntW(L"Settings", L"LsassProtect", 0, g_ConfigFile) == 1); 
 
+    g_bGroupPolicyHardening = (GetPrivateProfileIntW(L"Settings", L"GroupPolicyHardening", 1, g_ConfigFile) == 1);
+    g_bOutboundFirewall = (GetPrivateProfileIntW(L"Settings", L"OutboundFirewall", 1, g_ConfigFile) == 1);
+    g_bNetworkIsolation = (GetPrivateProfileIntW(L"Settings", L"NetworkIsolation", 0, g_ConfigFile) == 1);
+
     LoadExclusions();
 }
 
@@ -2040,6 +2156,10 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"Settings", L"HipsCanary", g_bHipsCanary ? L"1" : L"0", g_ConfigFile);
     WritePrivateProfileStringW(L"Settings", L"HostsGuard", g_bHostsGuard ? L"1" : L"0", g_ConfigFile);
     WritePrivateProfileStringW(L"Settings", L"LsassProtect", g_bLsassProtect ? L"1" : L"0", g_ConfigFile);
+
+    WritePrivateProfileStringW(L"Settings", L"GroupPolicyHardening", g_bGroupPolicyHardening ? L"1" : L"0", g_ConfigFile);
+    WritePrivateProfileStringW(L"Settings", L"OutboundFirewall", g_bOutboundFirewall ? L"1" : L"0", g_ConfigFile);
+    WritePrivateProfileStringW(L"Settings", L"NetworkIsolation", g_bNetworkIsolation ? L"1" : L"0", g_ConfigFile);
 
     SaveExclusions();
 }
@@ -2124,7 +2244,6 @@ bool ScanFileForSignatures(const std::wstring& filePath, std::wstring& foundSig)
 
     wchar_t hex[33] = {0};
     for (int i = 0; i < 16; i++) {
-        // Corrected hex formatting logic to construct a full 32-character MD5 hex string.
         swprintf_s(hex + (i * 2), 33 - (i * 2), L"%02x", outHash[i]);
     }
     if (g_WhitelistDatabase.count(hex) > 0) {
@@ -2253,7 +2372,6 @@ int AnalyzeHeuristicRisk(const std::wstring& filePath, std::wstring& riskReason)
         return 100; 
     }
 
-    // Integrated the Cloud Threat Intelligence check directly into the core heuristic scoring sequence
     BYTE outHash[16];
     if (GetFileBinaryMD5(filePath, outHash)) {
         wchar_t hex[33] = {0};
@@ -2297,7 +2415,6 @@ int AnalyzeHeuristicRisk(const std::wstring& filePath, std::wstring& riskReason)
         }
     }
 
-    // Heuristics tailored for traditional Windows XP structure
     if (lowerPath.find(L"\\temp\\") != std::wstring::npos || 
         lowerPath.find(L"\\appdata\\local\\temp") != std::wstring::npos ||
         lowerPath.find(L"\\local settings\\temp") != std::wstring::npos) {
@@ -2626,6 +2743,8 @@ DWORD WINAPI ScanThread(LPVOID lpParam) {
     g_TotalFilesToScan = 0;
     g_FilesScannedCount = 0;
 
+    VerifyUserPrivilegeLevel();
+
     std::vector<std::wstring> scanPaths;
 
     if (g_bFullScanActive) {
@@ -2808,7 +2927,6 @@ void CheckAndRemediateHostsFile() {
     GetWindowsDirectoryW(windir, MAX_PATH);
     std::wstring hostsPath = std::wstring(windir) + L"\\System32\\drivers\\etc\\hosts";
     
-    // Temporarily release the self-defense file lock to prevent access sharing violations (ERROR_SHARING_VIOLATION).
     if (g_hHostsFileLock != INVALID_HANDLE_VALUE) {
         CloseHandle(g_hHostsFileLock);
         g_hHostsFileLock = INVALID_HANDLE_VALUE;
@@ -2851,106 +2969,137 @@ void CheckAndRemediateHostsFile() {
         }
     }
 
-    // Re-acquire the hosts file self-defense lock
     ProtectHostsFile();
 }
 
 void CreateSettingsControls(HWND hParent) {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-    HWND hCtrl = CreateWindowExW(0, L"BUTTON", L"Active Real-time File Guard", WS_CHILD|BS_AUTOCHECKBOX, 170, 125, 280, 20, hParent, (HMENU)6001, GetModuleHandle(NULL), NULL);
+    // GroupBox 1: Symmetrical Left Column - Engine & Security Shields (height 225, width 295)
+    HWND hCtrl = CreateWindowExW(0, L"BUTTON", L"Engine & Security Shields", WS_CHILD | BS_GROUPBOX, 165, 95, 295, 225, hParent, (HMENU)7001, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Memory Exploit Guard", WS_CHILD|BS_AUTOCHECKBOX, 170, 150, 280, 20, hParent, (HMENU)6002, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Active Real-time File Guard", WS_CHILD | BS_AUTOCHECKBOX, 175, 115, 275, 20, hParent, (HMENU)6001, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"USB Autorun Vaccine Shield", WS_CHILD|BS_AUTOCHECKBOX, 170, 175, 280, 20, hParent, (HMENU)6003, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Memory Exploit Guard", WS_CHILD | BS_AUTOCHECKBOX, 175, 137, 275, 20, hParent, (HMENU)6002, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Browser Download Security Guard", WS_CHILD|BS_AUTOCHECKBOX, 170, 200, 280, 20, hParent, (HMENU)6004, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"USB Autorun Vaccine Shield", WS_CHILD | BS_AUTOCHECKBOX, 175, 159, 275, 20, hParent, (HMENU)6003, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Credential Leak Protection Shield", WS_CHILD|BS_AUTOCHECKBOX, 170, 225, 280, 20, hParent, (HMENU)6005, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Browser Download Security Guard", WS_CHILD | BS_AUTOCHECKBOX, 175, 181, 275, 20, hParent, (HMENU)6004, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Filter Vulnerable SMB Port 445", WS_CHILD|BS_AUTOCHECKBOX, 170, 250, 280, 20, hParent, (HMENU)6011, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Credential Leak Protection Shield", WS_CHILD | BS_AUTOCHECKBOX, 175, 203, 275, 20, hParent, (HMENU)6005, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Filter Vulnerable RPC Port 135", WS_CHILD|BS_AUTOCHECKBOX, 170, 275, 280, 20, hParent, (HMENU)6012, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Continuous Startup Sanitization Guard", WS_CHILD | BS_AUTOCHECKBOX, 175, 225, 275, 20, hParent, (HMENU)6010, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Filter Vulnerable RDP Port 3389", WS_CHILD|BS_AUTOCHECKBOX, 170, 300, 280, 20, hParent, (HMENU)6013, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Boot Engine Core Auto-Start on Startup", WS_CHILD | BS_AUTOCHECKBOX, 175, 247, 275, 20, hParent, (HMENU)6023, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Network Exploits & Firewall Shield", WS_CHILD|BS_AUTOCHECKBOX, 470, 125, 280, 20, hParent, (HMENU)6006, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Group Policy Security Baseline Policy", WS_CHILD | BS_AUTOCHECKBOX, 175, 269, 275, 20, hParent, (HMENU)6030, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"HIPS Canary File Activity Guard", WS_CHILD|BS_AUTOCHECKBOX, 470, 150, 280, 20, hParent, (HMENU)6007, GetModuleHandle(NULL), NULL);
+    // GroupBox 2: Symmetrical Right Column - Network & Firewalls (height 225, width 295, matching left bounds exactly)
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Network & Firewalls Settings", WS_CHILD | BS_GROUPBOX, 470, 95, 295, 225, hParent, (HMENU)7002, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Lock System HOSTS Configuration File", WS_CHILD|BS_AUTOCHECKBOX, 470, 175, 280, 20, hParent, (HMENU)6008, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Network Exploits & Firewall Shield", WS_CHILD | BS_AUTOCHECKBOX, 480, 115, 275, 20, hParent, (HMENU)6006, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Hardened LSASS Security Policy", WS_CHILD|BS_AUTOCHECKBOX, 470, 200, 280, 20, hParent, (HMENU)6009, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"HIPS Canary File Activity Guard", WS_CHILD | BS_AUTOCHECKBOX, 480, 137, 275, 20, hParent, (HMENU)6007, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Continuous Startup Sanitization Guard", WS_CHILD|BS_AUTOCHECKBOX, 470, 225, 280, 20, hParent, (HMENU)6010, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Lock System HOSTS Configuration File", WS_CHILD | BS_AUTOCHECKBOX, 480, 159, 275, 20, hParent, (HMENU)6008, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Boot Engine Core Auto-Start on Startup", WS_CHILD|BS_AUTOCHECKBOX, 470, 250, 280, 20, hParent, (HMENU)6023, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Hardened LSASS Security Policy", WS_CHILD | BS_AUTOCHECKBOX, 480, 181, 275, 20, hParent, (HMENU)6009, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Heur Low", WS_CHILD|BS_AUTORADIOBUTTON|WS_GROUP, 470, 275, 90, 20, hParent, (HMENU)6015, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Filter Vulnerable SMB Port 445", WS_CHILD | BS_AUTOCHECKBOX, 480, 203, 275, 20, hParent, (HMENU)6011, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Heur Med", WS_CHILD|BS_AUTORADIOBUTTON, 565, 275, 90, 20, hParent, (HMENU)6016, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Filter Vulnerable RPC Port 135", WS_CHILD | BS_AUTOCHECKBOX, 480, 225, 275, 20, hParent, (HMENU)6012, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Heur High", WS_CHILD|BS_AUTORADIOBUTTON, 660, 275, 90, 20, hParent, (HMENU)6017, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Filter Vulnerable RDP Port 3389", WS_CHILD | BS_AUTOCHECKBOX, 480, 247, 275, 20, hParent, (HMENU)6013, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Prompt Decision", WS_CHILD|BS_AUTORADIOBUTTON|WS_GROUP, 470, 300, 140, 20, hParent, (HMENU)6018, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Active Outbound Firewall Guard", WS_CHILD | BS_AUTOCHECKBOX, 480, 269, 275, 20, hParent, (HMENU)6031, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Auto Quarantine", WS_CHILD|BS_AUTORADIOBUTTON, 615, 300, 150, 20, hParent, (HMENU)6019, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Local Subnet VLAN Isolation Shield", WS_CHILD | BS_AUTOCHECKBOX, 480, 291, 275, 20, hParent, (HMENU)6032, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"STATIC", L"Excluded Folders (Ignored during scans):", WS_CHILD, 170, 325, 300, 15, hParent, (HMENU)6020, GetModuleHandle(NULL), NULL);
+    // GroupBox 3: Engine Thresholds & Heuristics (placed symmetrically below columns 1 & 2)
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Engine Thresholds & Heuristic Profiles", WS_CHILD | BS_GROUPBOX, 165, 325, 600, 55, hParent, (HMENU)7003, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOTIFY, 170, 345, 380, 75, hParent, (HMENU)6021, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Heur Low", WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP, 175, 345, 80, 20, hParent, (HMENU)6015, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Add Folder", WS_CHILD | BS_PUSHBUTTON, 560, 345, 90, 25, hParent, (HMENU)6024, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Heur Med", WS_CHILD | BS_AUTORADIOBUTTON, 260, 345, 80, 20, hParent, (HMENU)6016, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | BS_PUSHBUTTON, 660, 345, 90, 25, hParent, (HMENU)6025, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Heur High", WS_CHILD | BS_AUTORADIOBUTTON, 345, 345, 85, 20, hParent, (HMENU)6017, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 
-    hCtrl = CreateWindowExW(0, L"BUTTON", L"Save & Apply Protection Profile", WS_CHILD|BS_DEFPUSHBUTTON, 560, 380, 190, 40, hParent, (HMENU)6022, GetModuleHandle(NULL), NULL);
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Prompt Decision", WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP, 450, 345, 130, 20, hParent, (HMENU)6018, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Auto Quarantine", WS_CHILD | BS_AUTORADIOBUTTON, 590, 345, 150, 20, hParent, (HMENU)6019, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    // GroupBox 4: Scan Exclusions Manager (height 115, aligned perfectly with the layout)
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Scan Exclusions Manager", WS_CHILD | BS_GROUPBOX, 165, 385, 600, 115, hParent, (HMENU)7004, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    hCtrl = CreateWindowExW(0, L"STATIC", L"Excluded Folders (Ignored during scans):", WS_CHILD, 175, 400, 300, 15, hParent, (HMENU)6020, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    hCtrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOTIFY, 175, 418, 370, 72, hParent, (HMENU)6021, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Add Folder", WS_CHILD | BS_PUSHBUTTON, 555, 418, 95, 24, hParent, (HMENU)6024, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | BS_PUSHBUTTON, 655, 418, 95, 24, hParent, (HMENU)6025, GetModuleHandle(NULL), NULL);
+    SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+    g_SettingsWnds.push_back(hCtrl);
+
+    hCtrl = CreateWindowExW(0, L"BUTTON", L"Save & Apply Protection Profile", WS_CHILD | BS_DEFPUSHBUTTON, 555, 448, 195, 42, hParent, (HMENU)6022, GetModuleHandle(NULL), NULL);
     SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
     g_SettingsWnds.push_back(hCtrl);
 }
@@ -2970,6 +3119,10 @@ void SyncSettingsToUI() {
     CheckDlgButton(g_hMainWnd, 6012, g_bBlockPort135 ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_hMainWnd, 6013, g_bBlockPort3389 ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_hMainWnd, 6023, g_bAutoStart ? BST_CHECKED : BST_UNCHECKED);
+
+    CheckDlgButton(g_hMainWnd, 6030, g_bGroupPolicyHardening ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_hMainWnd, 6031, g_bOutboundFirewall ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_hMainWnd, 6032, g_bNetworkIsolation ? BST_CHECKED : BST_UNCHECKED);
 
     CheckDlgButton(g_hMainWnd, 6015 + g_HeuristicLevel, BST_CHECKED);
     CheckDlgButton(g_hMainWnd, 6018 + g_AutomationLevel, BST_CHECKED);
@@ -3022,6 +3175,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InitQuarantine();
             LoadSettings();
             CreateCanaryFiles();
+
+            ApplyGroupPolicyHardening();
+            ApplyNetworkIsolationShield();
+            VerifyUserPrivilegeLevel();
 
             NOTIFYICONDATAW nid = {0};
             nid.cbSize = sizeof(NOTIFYICONDATAW);
@@ -3207,7 +3364,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
         }
-        // Thread-safe marshalled GUI logs processed on the UI thread
         case WM_APP_ADD_LOG: {
             SafeLogPayload* p = (SafeLogPayload*)lParam;
             if (p) {
@@ -3383,16 +3539,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         PathRemoveFileSpecW(origDir);
                         SHCreateDirectoryExW(NULL, origDir, NULL);
                         
-                        // Prepare quarantine and destination file attributes (remove system and read-only states)
                         SetFileAttributesW(fullQPath.c_str(), FILE_ATTRIBUTE_NORMAL);
                         if (PathFileExistsW(orig)) {
                             SetFileAttributesW(orig, FILE_ATTRIBUTE_NORMAL);
                         }
 
-                        // Use a secure overwrite move method to replace the old or damaged file
                         if (MoveFileExW(fullQPath.c_str(), orig, MOVEFILE_REPLACE_EXISTING)) {
                             WritePrivateProfileStringW(L"Quarantine", qFile, NULL, g_ConfigFile);
-                            // Remove reason from settings file
                             WritePrivateProfileStringW(L"QuarantineReason", qFile, NULL, g_ConfigFile); 
                             ListView_DeleteItem(g_hListView, idx); 
                             ShowNotification(L"File Restored", L"File restored from quarantine to its original path successfully.", NIIF_INFO);
@@ -3417,7 +3570,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                     if (deleted || !PathFileExistsW(fullQPath.c_str())) {
                         WritePrivateProfileStringW(L"Quarantine", qFile, NULL, g_ConfigFile);
-                        // Clean up quarantine reason
                         WritePrivateProfileStringW(L"QuarantineReason", qFile, NULL, g_ConfigFile); 
                         ListView_DeleteItem(g_hListView, idx); 
                         ShowNotification(L"Quarantine Cleared", L"File permanently deleted from the quarantine directory.", NIIF_INFO);
@@ -3433,7 +3585,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ListView_GetItemText(g_hListView, idx, 0, itemText, MAX_PATH);
                     std::wstring fullPath = itemText;
 
-                    // If the user is on the Speedup tab, the row text contains only the process name; discover its executable file path.
                     if (g_Selected == 2) { 
                         std::wstring procPath = L"";
                         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -3442,7 +3593,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             if (Process32FirstW(hSnapshot, &pe)) {
                                 do {
                                     if (fullPath == pe.szExeFile) {
-                                        // Open the process to terminate it and retrieve its path
                                         HANDLE hProc = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe.th32ProcessID);
                                         if (hProc) {
                                             HMODULE hPsapi = LoadLibraryW(L"psapi.dll");
@@ -3457,7 +3607,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                                 }
                                                 FreeLibrary(hPsapi);
                                             }
-                                            // Close active process to allow Windows to release and quarantine its executable file
                                             TerminateProcess(hProc, 0);
                                             CloseHandle(hProc);
                                             if (!procPath.empty()) break;
@@ -3468,12 +3617,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             CloseHandle(hSnapshot);
                         }
                         if (!procPath.empty()) {
-                            // Replace target path with resolved full path
                             fullPath = procPath;
                         }
                     }
 
-                    // Attempt to quarantine the resolved file with its reason
                     std::wstring qReason = (g_Selected == 2) ? L"Suspicious Process (Speedup)" : L"Manual Isolation";
                     if (MoveToQuarantine(fullPath, qReason)) {
                         ListView_DeleteItem(g_hListView, idx);
@@ -3533,6 +3680,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 g_bAutoStart = (IsDlgButtonChecked(hWnd, 6023) == BST_CHECKED);
 
+                g_bGroupPolicyHardening = (IsDlgButtonChecked(hWnd, 6030) == BST_CHECKED);
+                g_bOutboundFirewall = (IsDlgButtonChecked(hWnd, 6031) == BST_CHECKED);
+                g_bNetworkIsolation = (IsDlgButtonChecked(hWnd, 6032) == BST_CHECKED);
+
                 if (IsDlgButtonChecked(hWnd, 6015)) g_HeuristicLevel = 0;
                 else if (IsDlgButtonChecked(hWnd, 6016)) g_HeuristicLevel = 1;
                 else if (IsDlgButtonChecked(hWnd, 6017)) g_HeuristicLevel = 2;
@@ -3543,6 +3694,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 ConfigureSystemPortNative(445, g_bBlockPort445);
                 ConfigureSystemPortNative(135, g_bBlockPort135);
                 ConfigureSystemPortNative(3389, g_bBlockPort3389);
+
+                ApplyGroupPolicyHardening();
+                ApplyNetworkIsolationShield();
 
                 SaveSettings();
                 ApplyAutoStartRegistry();
@@ -3616,7 +3770,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
 
     HWND hWnd = CreateWindowExW(0, L"SecureXPClass", L"Secure XP Pro v2", 
                                 (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE), 
-                                CW_USEDEFAULT, CW_USEDEFAULT, 800, 500, NULL, NULL, hInst, NULL);
+                                CW_USEDEFAULT, CW_USEDEFAULT, 800, 560, NULL, NULL, hInst, NULL);
     if(!hWnd) return 0;
     ShowWindow(hWnd, nCmdShow);
 

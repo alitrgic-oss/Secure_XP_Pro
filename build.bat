@@ -1,5 +1,7 @@
 @echo off
-title Building SecureXP Core (tdm64-gcc)
+title Building SecureXP Core (tdm64-gcc 32-bit)
+
+set "PATH=C:\TDM-GCC-64\bin;%PATH%"
 
 if not exist "SecureXP.cpp" (
     echo [ERROR] SecureXP.cpp was not found!
@@ -16,7 +18,6 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo Compiling C++ Code (Generating 32-bit XP Executable)...
-:: اضافه شدن -liphlpapi به انتهای دستور کامپایلر
 g++ SecureXP.cpp SecureXP_res.o -o SecureXP.exe -mwindows -static -std=c++11 -m32 -lwininet -lcrypt32 -lcomctl32 -lshlwapi -ladvapi32 -lshell32 -lole32 -luuid -luser32 -lkernel32 -lgdi32 -lcomdlg32 -liphlpapi
 
 if %ERRORLEVEL%==0 (

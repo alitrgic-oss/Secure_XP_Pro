@@ -6,20 +6,28 @@
 #include <shlobj.h>
 #include <objbase.h>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
 
-// شناسه‌های کنترل‌ها و صفحات جادوگر (Wizard Pages)
 enum WizardStep {
     STEP_WELCOME = 0,
     STEP_EULA,
     STEP_DIRECTORY,
     STEP_OPTIONS,
+    STEP_READY,
     STEP_INSTALLING,
     STEP_FINISH
+};
+
+struct InstallParams {
+    HWND hwnd;
+    wchar_t installPath[MAX_PATH];
+    BOOL desktopShortcut;
+    BOOL startMenuShortcut;
 };
 
 WizardStep g_CurrentStep = STEP_WELCOME;
@@ -29,12 +37,10 @@ HWND g_hNextBtn = NULL;
 HWND g_hBackBtn = NULL;
 HWND g_hCancelBtn = NULL;
 
-// متغیرهای تنظیمات نصب
 wchar_t g_InstallPath[MAX_PATH] = L"C:\\Program Files\\SecureXP Antivirus";
 BOOL g_CreateDesktopShortcut = TRUE;
 BOOL g_CreateStartMenuShortcut = TRUE;
 
-// ارجاعات به پنجره‌های محلی مراحل مختلف
 HWND g_hEulaEdit = NULL;
 HWND g_hEulaRadioAgree = NULL;
 HWND g_hEulaRadioDisAgree = NULL;
@@ -45,7 +51,6 @@ HWND g_hCheckStartMenu = NULL;
 HWND g_hProgressBar = NULL;
 HWND g_hStatusText = NULL;
 
-// توابع کمکی خواندن منابع
 std::string LoadResourceText(int resId) {
     HMODULE hModule = GetModuleHandle(NULL);
     HRSRC hResInfo = FindResourceW(hModule, MAKEINTRESOURCEW(resId), RT_RCDATA);
@@ -58,7 +63,6 @@ std::string LoadResourceText(int resId) {
     return std::string((char*)pData, dwSize);
 }
 
-// تبدیل رشته ANSI به WideChar جهت پشتیبانی از یونیکد
 std::wstring AnsiToWide(const std::string& str) {
     if (str.empty()) return L"";
     int size = MultiByteToWideChar(CP_ACP, 0, &str[0], (int)str.size(), NULL, 0);
@@ -88,7 +92,6 @@ bool ExtractAntivirus(const std::wstring& destFile) {
 bool CreateShortcuts(const std::wstring& targetExe) {
     CoInitialize(NULL);
     
-    // ۱. شورت‌کات دسکتاپ
     if (g_CreateDesktopShortcut) {
         wchar_t desktopPath[MAX_PATH];
         if (SHGetSpecialFolderPathW(NULL, desktopPath, CSIDL_DESKTOP, FALSE)) {
@@ -109,7 +112,6 @@ bool CreateShortcuts(const std::wstring& targetExe) {
         }
     }
 
-    // ۲. شورت‌کات منوی استارت
     if (g_CreateStartMenuShortcut) {
         wchar_t startMenuPath[MAX_PATH];
         if (SHGetSpecialFolderPathW(NULL, startMenuPath, CSIDL_PROGRAMS, FALSE)) {
@@ -153,25 +155,41 @@ std::wstring BrowseInstallFolder(HWND hwnd) {
     return path;
 }
 
-// به‌روزرسانی کنترل‌ها براساس صفحه فعال جادوگر
-void UpdateWizardView() {
-    // پاکسازی کنترل‌های صفحات قبلی در صورت وجود
-    HWND hChild = GetWindow(g_hMainWnd, GW_CHILD);
-    while (hChild) {
-        HWND hNext = GetWindow(hChild, GW_HWNDNEXT);
-        int id = GetDlgCtrlID(hChild);
-        // کنترل‌های استاندارد پایین صفحه (دکمه‌ها) را پاک نکنیم
-        if (hChild != g_hNextBtn && hChild != g_hBackBtn && hChild != g_hCancelBtn) {
-            // بررسی می‌کنیم که استاتیک‌بار هدر بالا نباشد
-            wchar_t cls[64];
-            GetClassNameW(hChild, cls, 64);
-            if (wcscmp(cls, L"STATIC") != 0 || id > 50) { 
-                // حذف کنترل‌های مراحل قبلی
-                // برای سادگی در این معماری، پنجره را ریفرش یا کنترل‌ها را مدیریت می‌کنیم
-            }
-        }
-        hChild = hNext;
-    }
+DWORD WINAPI InstallThread(LPVOID lpParam) {
+    InstallParams* params = (InstallParams*)lpParam;
+    HWND hwnd = params->hwnd;
+
+    SendMessage(g_hProgressBar, PBM_SETPOS, 10, 0);
+    SetWindowTextW(g_hStatusText, L"Verifying system requirement dependencies...");
+    Sleep(600);
+
+    SendMessage(g_hProgressBar, PBM_SETPOS, 25, 0);
+    SetWindowTextW(g_hStatusText, L"Allocating file paths and directories...");
+    SHCreateDirectoryExW(hwnd, params->installPath, NULL);
+    Sleep(500);
+
+    SendMessage(g_hProgressBar, PBM_SETPOS, 50, 0);
+    SetWindowTextW(g_hStatusText, L"Extracting SecureXP.exe to target path...");
+    std::wstring destFile = std::wstring(params->installPath) + L"\\SecureXP.exe";
+    ExtractAntivirus(destFile);
+    Sleep(800);
+
+    SendMessage(g_hProgressBar, PBM_SETPOS, 75, 0);
+    SetWindowTextW(g_hStatusText, L"Creating system links and environment shortcuts...");
+    CreateShortcuts(destFile);
+    Sleep(600);
+
+    SendMessage(g_hProgressBar, PBM_SETPOS, 95, 0);
+    SetWindowTextW(g_hStatusText, L"Finalizing security configuration profile parameters...");
+    Sleep(500);
+
+    SendMessage(g_hProgressBar, PBM_SETPOS, 100, 0);
+    Sleep(200);
+
+    PostMessage(hwnd, WM_USER + 101, 0, 0);
+
+    delete params;
+    return 0;
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -179,8 +197,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CREATE: {
             HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-            // دکمه‌های پایینی استاندارد ویزارد
-            g_hBackButton:
             g_hBackBtn = CreateWindowExW(0, L"BUTTON", L"< &Back", WS_VISIBLE|WS_CHILD|BS_PUSHBUTTON|WS_DISABLED, 230, 325, 75, 25, hWnd, (HMENU)101, NULL, NULL);
             g_hNextBtn = CreateWindowExW(0, L"BUTTON", L"&Next >", WS_VISIBLE|WS_CHILD|BS_DEFPUSHBUTTON, 310, 325, 75, 25, hWnd, (HMENU)102, NULL, NULL);
             g_hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_VISIBLE|WS_CHILD|BS_PUSHBUTTON, 395, 325, 75, 25, hWnd, (HMENU)103, NULL, NULL);
@@ -189,15 +205,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessage(g_hNextBtn, WM_SETFONT, (WPARAM)hFont, FALSE);
             SendMessage(g_hCancelBtn, WM_SETFONT, (WPARAM)hFont, FALSE);
 
-            // ارسال پیام ساخت صفحه اول
             PostMessage(hWnd, WM_USER + 100, 0, STEP_WELCOME);
             break;
         }
-        case WM_USER + 100: { // ساخت عناصر صفحه جاری
+        case WM_USER + 100: { 
             int step = (int)lParam;
             HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
             
-            // حذف المان‌های پویای قبلی
             HWND hCur = GetWindow(hWnd, GW_CHILD);
             while(hCur) {
                 HWND hNxt = GetWindow(hCur, GW_HWNDNEXT);
@@ -221,7 +235,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             else if (step == STEP_EULA) {
                 EnableWindow(g_hBackBtn, TRUE);
-                EnableWindow(g_hNextBtn, FALSE); // غیرفعال تا کاربر توافق‌نامه را قبول کند
+                EnableWindow(g_hNextBtn, FALSE); 
 
                 HWND hTitle = CreateWindowExW(0, L"STATIC", L"License Agreement", WS_VISIBLE|WS_CHILD, 20, 10, 440, 20, hWnd, NULL, NULL, NULL);
                 SendMessage(hTitle, WM_SETFONT, (WPARAM)hFont, FALSE);
@@ -229,13 +243,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HWND hSub = CreateWindowExW(0, L"STATIC", L"Please read the following license agreement carefully.", WS_VISIBLE|WS_CHILD, 20, 30, 440, 20, hWnd, NULL, NULL, NULL);
                 SendMessage(hSub, WM_SETFONT, (WPARAM)hFont, FALSE);
 
-                // باکس متن EULA
                 std::string eulaText = LoadResourceText(102);
                 std::wstring wEula = AnsiToWide(eulaText);
+                if (wEula.empty()) {
+                    wEula = L"SecureXP Antivirus Pro License Agreement\n\n1. Grant of License: SecureXP grants you a non-exclusive license to use this software on a single computer system.\n\n2. Restrictions: You may not reverse-engineer, decompile, or disassemble this security software.\n\n3. Liability: The authors shall not be held liable for any damages resulting from the use or misuse of this software.";
+                }
                 g_hEulaEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", wEula.c_str(), WS_VISIBLE|WS_CHILD|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|ES_READONLY, 20, 55, 450, 180, hWnd, NULL, NULL, NULL);
                 SendMessage(g_hEulaEdit, WM_SETFONT, (WPARAM)hFont, FALSE);
 
-                // رادیوباتن‌های قبول توافق‌نامه
                 g_hEulaRadioDisAgree = CreateWindowExW(0, L"BUTTON", L"I do not accept the agreement", WS_VISIBLE|WS_CHILD|BS_AUTORADIOBUTTON, 20, 245, 400, 20, hWnd, (HMENU)201, NULL, NULL);
                 g_hEulaRadioAgree = CreateWindowExW(0, L"BUTTON", L"I accept the agreement", WS_VISIBLE|WS_CHILD|BS_AUTORADIOBUTTON, 20, 275, 400, 20, hWnd, (HMENU)202, NULL, NULL);
                 SendMessage(g_hEulaRadioDisAgree, WM_SETFONT, (WPARAM)hFont, FALSE);
@@ -277,6 +292,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SendMessage(g_hCheckDesktop, BM_SETCHECK, g_CreateDesktopShortcut ? BST_CHECKED : BST_UNCHECKED, 0);
                 SendMessage(g_hCheckStartMenu, BM_SETCHECK, g_CreateStartMenuShortcut ? BST_CHECKED : BST_UNCHECKED, 0);
             }
+            else if (step == STEP_READY) {
+                EnableWindow(g_hBackBtn, TRUE);
+                EnableWindow(g_hNextBtn, TRUE);
+                SetWindowTextW(g_hNextBtn, L"&Install");
+
+                HWND hTitle = CreateWindowExW(0, L"STATIC", L"Ready to Install", WS_VISIBLE|WS_CHILD, 20, 15, 440, 25, hWnd, NULL, NULL, NULL);
+                SendMessage(hTitle, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+                HWND hSub = CreateWindowExW(0, L"STATIC", L"Setup is now ready to begin installing SecureXP on your computer.", WS_VISIBLE|WS_CHILD, 20, 45, 440, 20, hWnd, NULL, NULL, NULL);
+                SendMessage(hSub, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+                std::wstring summary = L"Click Install to continue with the installation, or click Back to review settings.\n\n";
+                summary += L"Destination Location:\n  " + std::wstring(g_InstallPath) + L"\n\n";
+                summary += L"Selected Tasks:\n";
+                if (g_CreateDesktopShortcut) summary += L"  - Create a desktop shortcut\n";
+                if (g_CreateStartMenuShortcut) summary += L"  - Create a Start Menu folder shortcut\n";
+
+                HWND hSummary = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", summary.c_str(), WS_VISIBLE|WS_CHILD|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|ES_READONLY, 20, 75, 450, 180, hWnd, NULL, NULL, NULL);
+                SendMessage(hSummary, WM_SETFONT, (WPARAM)hFont, FALSE);
+            }
             else if (step == STEP_INSTALLING) {
                 EnableWindow(g_hBackBtn, FALSE);
                 EnableWindow(g_hNextBtn, FALSE);
@@ -285,37 +320,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HWND hTitle = CreateWindowExW(0, L"STATIC", L"Installing SecureXP", WS_VISIBLE|WS_CHILD, 20, 15, 440, 25, hWnd, NULL, NULL, NULL);
                 SendMessage(hTitle, WM_SETFONT, (WPARAM)hFont, FALSE);
 
-                g_hStatusText = CreateWindowExW(0, L"STATIC", L"Extracting files...", WS_VISIBLE|WS_CHILD, 20, 60, 440, 20, hWnd, NULL, NULL, NULL);
+                g_hStatusText = CreateWindowExW(0, L"STATIC", L"Initializing security setup system...", WS_VISIBLE|WS_CHILD, 20, 60, 440, 20, hWnd, NULL, NULL, NULL);
                 SendMessage(g_hStatusText, WM_SETFONT, (WPARAM)hFont, FALSE);
 
                 g_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, NULL, WS_VISIBLE|WS_CHILD, 20, 90, 450, 25, hWnd, NULL, NULL, NULL);
                 SendMessage(g_hProgressBar, PBM_SETSTEP, (WPARAM)1, 0);
                 SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
 
-                // اجرای عملیات نصب در پس‌زمینه نصب‌کننده
                 UpdateWindow(hWnd);
-                
-                // ایجاد دایرکتوری
-                SHCreateDirectoryExW(hWnd, g_InstallPath, NULL);
-                SendMessage(g_hProgressBar, PBM_SETPOS, 30, 0);
-                Sleep(300);
 
-                // استخراج فایل اجرایی
-                std::wstring destFile = std::wstring(g_InstallPath) + L"\\SecureXP.exe";
-                SetWindowTextW(g_hStatusText, L"Writing SecureXP.exe to destination...");
-                ExtractAntivirus(destFile);
-                SendMessage(g_hProgressBar, PBM_SETPOS, 70, 0);
-                Sleep(400);
+                InstallParams* params = new InstallParams();
+                params->hwnd = hWnd;
+                wcscpy_s(params->installPath, MAX_PATH, g_InstallPath);
+                params->desktopShortcut = g_CreateDesktopShortcut;
+                params->startMenuShortcut = g_CreateStartMenuShortcut;
 
-                // ساخت شورت‌کات‌ها
-                SetWindowTextW(g_hStatusText, L"Creating shortcuts...");
-                CreateShortcuts(destFile);
-                SendMessage(g_hProgressBar, PBM_SETPOS, 100, 0);
-                Sleep(300);
-
-                // رفتن خودکار به مرحله آخر
-                g_CurrentStep = STEP_FINISH;
-                PostMessage(hWnd, WM_USER + 100, 0, STEP_FINISH);
+                CreateThread(NULL, 0, InstallThread, params, 0, NULL);
             }
             else if (step == STEP_FINISH) {
                 EnableWindow(g_hBackBtn, FALSE);
@@ -332,29 +352,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
         }
+        case WM_USER + 101: {
+            g_CurrentStep = STEP_FINISH;
+            PostMessage(hWnd, WM_USER + 100, 0, STEP_FINISH);
+            break;
+        }
         case WM_COMMAND: {
             int wmId = LOWORD(wParam);
-            int wmEvent = HIWORD(wParam);
 
-            if (wmId == 203) { // دکمه Browse در صفحه مسیر
+            if (wmId == 203) { 
                 std::wstring folder = BrowseInstallFolder(hWnd);
                 if (!folder.empty()) {
                     wcsncpy(g_InstallPath, folder.c_str(), MAX_PATH - 1);
                     SetWindowTextW(g_hEditPath, g_InstallPath);
                 }
             }
-            else if (wmId == 202) { // کلیک روی قبول توافق‌نامه
+            else if (wmId == 202) { 
                 if (g_CurrentStep == STEP_EULA) EnableWindow(g_hNextBtn, TRUE);
             }
-            else if (wmId == 201) { // کلیک روی عدم قبول توافق‌نامه
+            else if (wmId == 201) { 
                 if (g_CurrentStep == STEP_EULA) EnableWindow(g_hNextBtn, FALSE);
             }
-            else if (wmId == 103) { // دکمه Cancel
+            else if (wmId == 103) { 
                 if (MessageBoxW(hWnd, L"Are you sure you want to cancel Setup?", L"SecureXP Setup", MB_YESNO|MB_ICONQUESTION) == IDYES) {
                     DestroyWindow(hWnd);
                 }
             }
-            else if (wmId == 102) { // دکمه Next / Finish
+            else if (wmId == 102) { 
                 if (g_CurrentStep == STEP_WELCOME) {
                     g_CurrentStep = STEP_EULA;
                     PostMessage(hWnd, WM_USER + 100, 0, STEP_EULA);
@@ -372,6 +396,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_CreateDesktopShortcut = (SendMessage(g_hCheckDesktop, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     g_CreateStartMenuShortcut = (SendMessage(g_hCheckStartMenu, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     
+                    g_CurrentStep = STEP_READY;
+                    PostMessage(hWnd, WM_USER + 100, 0, STEP_READY);
+                }
+                else if (g_CurrentStep == STEP_READY) {
                     g_CurrentStep = STEP_INSTALLING;
                     PostMessage(hWnd, WM_USER + 100, 0, STEP_INSTALLING);
                 }
@@ -379,7 +407,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DestroyWindow(hWnd);
                 }
             }
-            else if (wmId == 101) { // دکمه Back
+            else if (wmId == 101) { 
                 if (g_CurrentStep == STEP_EULA) {
                     g_CurrentStep = STEP_WELCOME;
                     PostMessage(hWnd, WM_USER + 100, 0, STEP_WELCOME);
@@ -391,6 +419,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 else if (g_CurrentStep == STEP_OPTIONS) {
                     g_CurrentStep = STEP_DIRECTORY;
                     PostMessage(hWnd, WM_USER + 100, 0, STEP_DIRECTORY);
+                }
+                else if (g_CurrentStep == STEP_READY) {
+                    g_CurrentStep = STEP_OPTIONS;
+                    PostMessage(hWnd, WM_USER + 100, 0, STEP_OPTIONS);
                 }
             }
             break;
@@ -405,7 +437,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
-    // فعالسازی کنترل‌های رایج ویندوز ایکس‌پی (ComCtl32 v6) برای ظاهر گرافیکی مدرن‌تر
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
     icex.dwICC = ICC_WIN95_CLASSES | ICC_PROGRESS_CLASS;
@@ -416,20 +447,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); // رنگ استاندارد پس‌زمینه دیالوگ ویندوز
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); 
     wc.lpszClassName = L"SecureXPSetupWizardClass";
-    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101)); // بارگذاری آیکون از فایل منابع RC
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101)); 
     wc.hIconSm = LoadIconW(hInst, MAKEINTRESOURCEW(101));
     RegisterClassExW(&wc);
 
-    HWND hWnd = CreateWindowExW(0, L"SecureXPSetupClass", L"SecureXP Pro - Setup Wizard", 
-                                (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE), 
-                                CW_USEDEFAULT, CW_USEDEFAULT, 500, 395, NULL, NULL, hInst, NULL);
-    
-    // تصحیح نام کلاس پنجره ثبت شده در بالا
-    // (جهت جلوگیری از خطای کلاس گمشده در CreateWindow بالا)
-    DestroyWindow(hWnd);
-    hWnd = CreateWindowExW(0, L"SecureXPSetupWizardClass", L"SecureXP Pro - Setup Wizard", 
+    HWND hWnd = CreateWindowExW(0, L"SecureXPSetupWizardClass", L"SecureXP Pro - Setup Wizard", 
                            (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE), 
                            CW_USEDEFAULT, CW_USEDEFAULT, 500, 395, NULL, NULL, hInst, NULL);
 
